@@ -13,9 +13,31 @@ from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter 
 # 1. Load CSV
 
-loader = CSVLoader(file_path="C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/employee_data.csv", encoding="utf-8")
+# 0. Preprocess CSV
+# File paths (ADJUST THESE TO YOUR ACTUAL PATHS)
+original_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/employee_data.csv"
+processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_employee_data.csv"
+
+# 1. Preprocess data
+df = pd.read_csv(original_csv)
+
+# Create enhanced context
+df["full_context"] = df.apply(
+    lambda row: f"Employee: {row['EmployeeID']}\nRole: {row['Name']} ({row['Department']})\nSkills: {row['Salary']}\nExperience: {row['JoiningDate']} years",
+    axis=1
+)
+
+# Save processed data
+df[["full_context"]].to_csv(processed_csv, index=False)
+
+# 2. Load processed CSV (now use full path here too!)
+loader = CSVLoader(
+    file_path=processed_csv,  # <- Full path
+    csv_args={"fieldnames": ["full_context"]}
+)
 documents = loader.load()
 
+# Continue with existing retrieval optimization steps...
 # 2. Split documents into chunks
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 split_documents = text_splitter.split_documents(documents)
