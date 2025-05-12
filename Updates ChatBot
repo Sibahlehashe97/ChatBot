@@ -1,0 +1,131 @@
+import pandas as pd
+import streamlit as st
+ 
+from langchain.document_loaders import CSVLoader
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain_huggingface import HuggingFacePipeline
+
+# Add these at the top with other imports
+from langchain.retrievers import BM25Retriever, EnsembleRetriever
+from langchain.text_splitter import RecursiveCharacterTextSplitter 
+
+ 
+# 0. Preprocess CSV
+# File paths (ADJUST THESE TO YOUR ACTUAL PATHS)
+original_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/student_habits_performance.csv"
+processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_student_habits_performance.csv" 
+
+#processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_employee_data.csv"
+
+
+df = pd.read_csv(original_csv)
+
+df["full_context"] = df.apply(
+    lambda row: (
+        f"Student ID: {row['student_id']}\n"
+        f"Age: {row['age']}\n"
+        f"Gender: {row['gender']}\n"
+        f"Study Hours/Day: {row['study_hours_per_day']}\n"
+        f"Social Media Hours: {row['social_media_hours']}\n"
+        f"Netflix Hours: {row['netflix_hours']}\n"
+        f"Part-Time Job: {row['part_time_job']}\n"
+        f"Attendance %: {row['attendance_percentage']}\n"
+        f"Sleep Hours: {row['sleep_hours']}\n"
+        f"Diet Quality: {row['diet_quality']}\n"
+        f"Exercise Frequency: {row['exercise_frequency']}\n"
+        f"Parent Education: {row['parental_education_level']}\n"
+        f"Internet Quality: {row['internet_quality']}\n"
+        f"Mental Health: {row['mental_health_rating']}\n"
+        f"Extracurriculars: {row['extracurricular_participation']}\n"
+        f"Exam Score: {row['exam_score']}"
+    ),
+    axis=1
+)
+
+
+
+# Create enhanced context
+#df["full_context"] = df.apply(
+#    lambda row: f"Date: {row['Date']}\nOpen: {row['Open']}\nHigh: {row['High']}\nLow: {row['Low']}\nClose: {row['Close']}\nAdj Close: {row['Adj Close']}\nVolume: {row['Volume']}",
+#    axis=1
+#)
+
+
+
+# Create enhanced context
+#df["full_context"] = df.apply(
+#    lambda row: f"Employee: {row['EmployeeID']}\nRole: {row['Name']} ({row['Department']})\nSkills: {row['Salary']}\nExperience: {row['JoiningDate']} years",
+#    axis=1
+#)
+
+
+
+
+
+
+# Save processed data
+df[["full_context"]].to_csv(processed_csv, index=False)
+# 2. Load processed CSV (now use full path here too!)
+loader = CSVLoader(
+    file_path=processed_csv,  # <- Full path
+    csv_args={"fieldnames": ["full_context"]}
+)
+documents = loader.load()
+
+
+
+# Continue with existing retrieval optimization steps...
+# 2. Split documents into chunks
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+split_documents = text_splitter.split_documents(documents)
+# 3. Create retrievers
+# BM25 (keyword-based)
+bm25_retriever = BM25Retriever.from_documents(split_documents)
+bm25_retriever.k = 3
+
+
+
+
+# Vector Store (semantic)
+hf_embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vector_store = Chroma.from_documents(split_documents, hf_embeddings)
+vector_retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+
+
+# Hybrid retriever
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[vector_retriever, bm25_retriever],
+    weights=[0.6, 0.4]
+)
+ 
+
+# 3. Load LLM
+llm = HuggingFacePipeline.from_model_id(
+    model_id="google/flan-t5-large",
+    task="text2text-generation",
+    pipeline_kwargs={"max_new_tokens": 128}
+)
+ 
+# 4. Setup QA chain
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",  # Better for small contexts
+    retriever=ensemble_retriever,  # Use our combined retriever
+    return_source_documents=False,
+)
+ 
+# 5. Streamlit UI
+st.title("📊 Employee Chatbot")
+st.write("Ask any question about the employee dataset:")
+ 
+user_question = st.text_input("Your question")
+ 
+if user_question:
+    with st.spinner("Thinking..."):
+        response = qa_chain.run(user_question)
+    st.success(response)
+ 
+import sys
+print(sys.executable)
