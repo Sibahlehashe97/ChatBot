@@ -1,131 +1,72 @@
-import pandas as pd
 import streamlit as st
- 
-from langchain.document_loaders import CSVLoader
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain_huggingface import HuggingFacePipeline
+import pandas as pd
+import subprocess
+import textwrap
+import re
 
-# Add these at the top with other imports
-from langchain.retrievers import BM25Retriever, EnsembleRetriever
-from langchain.text_splitter import RecursiveCharacterTextSplitter 
+st.set_page_config(page_title="Ask Your Excel File", layout="centered")
+st.title("📊 Ask Questions About Your Employee Data")
 
- 
-# 0. Preprocess CSV
-# File paths (ADJUST THESE TO YOUR ACTUAL PATHS)
-original_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/student_habits_performance.csv"
-processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_student_habits_performance.csv" 
+# Step 1: Upload Excel and convert to DataFrame
+uploaded_file = st.file_uploader("Upload your employee Excel file", type=["xlsx"])
 
-#processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_employee_data.csv"
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
+    st.success("✅ Data loaded successfully!")
+    st.write("### Preview of your dataset:", df.head())
 
+    # Step 2: Ask natural language question
+    user_question = st.text_input("💬 Ask a question about the dataset:",
+                                   placeholder="e.g., How much did we spend on salaries?")
 
-df = pd.read_csv(original_csv)
+    if user_question:
+        # Step 3: Build LLM prompt
+        column_info = ", ".join(df.columns)
+        sample_data = df.head(3).to_dict(orient="records")
 
-df["full_context"] = df.apply(
-    lambda row: (
-        f"Student ID: {row['student_id']}\n"
-        f"Age: {row['age']}\n"
-        f"Gender: {row['gender']}\n"
-        f"Study Hours/Day: {row['study_hours_per_day']}\n"
-        f"Social Media Hours: {row['social_media_hours']}\n"
-        f"Netflix Hours: {row['netflix_hours']}\n"
-        f"Part-Time Job: {row['part_time_job']}\n"
-        f"Attendance %: {row['attendance_percentage']}\n"
-        f"Sleep Hours: {row['sleep_hours']}\n"
-        f"Diet Quality: {row['diet_quality']}\n"
-        f"Exercise Frequency: {row['exercise_frequency']}\n"
-        f"Parent Education: {row['parental_education_level']}\n"
-        f"Internet Quality: {row['internet_quality']}\n"
-        f"Mental Health: {row['mental_health_rating']}\n"
-        f"Extracurriculars: {row['extracurricular_participation']}\n"
-        f"Exam Score: {row['exam_score']}"
-    ),
-    axis=1
-)
+        prompt = f"""
+You are a Python data analyst. Given a DataFrame called `df` with these columns: {column_info}
+Here are a few sample rows from the dataset: {sample_data}
 
+The user asked: "{user_question}"
 
+Write a Python function named `answer(df)` that answers the question using pandas.
+Only return the code with the function definition and no explanations or markdown.ANd no importing any libraries just the function only
+DateNotified and DateClosed are date type columns
+        """
 
-# Create enhanced context
-#df["full_context"] = df.apply(
-#    lambda row: f"Date: {row['Date']}\nOpen: {row['Open']}\nHigh: {row['High']}\nLow: {row['Low']}\nClose: {row['Close']}\nAdj Close: {row['Adj Close']}\nVolume: {row['Volume']}",
-#    axis=1
-#)
+        st.subheader("🔧 Generated Code")
+        st.write("Asking LLaMA2...")
 
+        # Step 4: Call local LLaMA2 with Ollama (capture stdout)
+        try:
+            result = subprocess.run(
+                ["ollama", "run", "tinyllama", prompt],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            raw_code = result.stdout.strip()
 
+            # Step 5: Remove triple backticks and clean code block
+            clean_code = re.sub(r"```(?:python)?|```", "", raw_code).strip()
 
-# Create enhanced context
-#df["full_context"] = df.apply(
-#    lambda row: f"Employee: {row['EmployeeID']}\nRole: {row['Name']} ({row['Department']})\nSkills: {row['Salary']}\nExperience: {row['JoiningDate']} years",
-#    axis=1
-#)
+            # Step 6: Show the code to the user
+            st.code(clean_code, language="python")
 
+            # Step 7: Define and run the generated function
+            local_vars = {}
+           
+            exec(clean_code, {}, local_vars)
 
+            if "answer" in local_vars:
+                output = local_vars["answer"](df)
+                st.subheader("📌 Result")
+                st.write(output)
+            else:
+                st.error("❌ No 'answer' function was defined in the code.")
 
-
-
-
-# Save processed data
-df[["full_context"]].to_csv(processed_csv, index=False)
-# 2. Load processed CSV (now use full path here too!)
-loader = CSVLoader(
-    file_path=processed_csv,  # <- Full path
-    csv_args={"fieldnames": ["full_context"]}
-)
-documents = loader.load()
-
-
-
-# Continue with existing retrieval optimization steps...
-# 2. Split documents into chunks
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-split_documents = text_splitter.split_documents(documents)
-# 3. Create retrievers
-# BM25 (keyword-based)
-bm25_retriever = BM25Retriever.from_documents(split_documents)
-bm25_retriever.k = 3
-
-
-
-
-# Vector Store (semantic)
-hf_embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vector_store = Chroma.from_documents(split_documents, hf_embeddings)
-vector_retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-
-
-# Hybrid retriever
-ensemble_retriever = EnsembleRetriever(
-    retrievers=[vector_retriever, bm25_retriever],
-    weights=[0.6, 0.4]
-)
- 
-
-# 3. Load LLM
-llm = HuggingFacePipeline.from_model_id(
-    model_id="google/flan-t5-large",
-    task="text2text-generation",
-    pipeline_kwargs={"max_new_tokens": 128}
-)
- 
-# 4. Setup QA chain
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",  # Better for small contexts
-    retriever=ensemble_retriever,  # Use our combined retriever
-    return_source_documents=False,
-)
- 
-# 5. Streamlit UI
-st.title("📊 Employee Chatbot")
-st.write("Ask any question about the employee dataset:")
- 
-user_question = st.text_input("Your question")
- 
-if user_question:
-    with st.spinner("Thinking..."):
-        response = qa_chain.run(user_question)
-    st.success(response)
- 
-import sys
-print(sys.executable)
+        except subprocess.CalledProcessError as e:
+            st.error("❌ Error from Ollama: " + str(e))
+        except Exception as e:
+            st.error("❌ Code execution error: " + str(e))
