@@ -3,6 +3,7 @@ import pandas as pd
 import subprocess
 import textwrap
 import re
+import datetime
 
 st.set_page_config(page_title="Ask Your Excel File", layout="centered")
 st.title("📊 Ask Questions About Your Employee Data")
@@ -17,7 +18,7 @@ if uploaded_file:
 
     # Step 2: Ask natural language question
     user_question = st.text_input("💬 Ask a question about the dataset:",
-                                   placeholder="e.g., How much did we spend on salaries?")
+                                  placeholder="e.g., How much did we spend on salaries?")
 
     if user_question:
         # Step 3: Build LLM prompt
@@ -32,7 +33,11 @@ The user asked: "{user_question}"
 
 Write a Python function named `answer(df)` that answers the question using pandas.
 Only return the code with the function definition and no explanations or markdown.ANd no importing any libraries just the function only
-DateNotified and DateClosed are date type columns
+DateNotified and DateClosed are date type columns. With users queries relating to datetime, make sure you import datetimr inside the function such as in the following function : def answer(df):
+    from datetime import datetime  # Local import
+    start_date = datetime(2024, 9, 1)
+    end_date = datetime(2024, 12, 31)
+    return df[(df['DateNotified'] >= start_date) & (df['DateNotified'] <= end_date)]
         """
 
         st.subheader("🔧 Generated Code")
@@ -40,24 +45,34 @@ DateNotified and DateClosed are date type columns
 
         # Step 4: Call local LLaMA2 with Ollama (capture stdout)
         try:
-            result = subprocess.run(
-                ["ollama", "run", "tinyllama", prompt],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            raw_code = result.stdout.strip()
+            # API call to local Ollama server
+            def call_ollama(prompt):
+                import requests
+                url = "http://localhost:11434/api/generate"
+                headers = {"Content-Type": "application/json"}
+                data = {
+                    "model": "codellama",  # or llama2 if you prefer
+                    "prompt": prompt,
+                    "stream": False
+                }
 
-            # Step 5: Remove triple backticks and clean code block
+                response = requests.post(url, headers=headers, json=data)
+                response.raise_for_status()
+                return response.json()["response"]
+
+            raw_code = call_ollama(prompt).strip()
+
+            # Step 5: Remove triple backticks and clean up
             clean_code = re.sub(r"```(?:python)?|```", "", raw_code).strip()
 
-            # Step 6: Show the code to the user
+            # Step 6: Display the function
             st.code(clean_code, language="python")
 
-            # Step 7: Define and run the generated function
+            # Step 7: Execute the code
+            global_vars = {"pd": pd, "datetime": datetime, "Timestamp": pd.Timestamp}
             local_vars = {}
-           
-            exec(clean_code, {}, local_vars)
+
+            exec(clean_code, global_vars, local_vars)
 
             if "answer" in local_vars:
                 output = local_vars["answer"](df)
@@ -66,7 +81,5 @@ DateNotified and DateClosed are date type columns
             else:
                 st.error("❌ No 'answer' function was defined in the code.")
 
-        except subprocess.CalledProcessError as e:
-            st.error("❌ Error from Ollama: " + str(e))
         except Exception as e:
-            st.error("❌ Code execution error: " + str(e))
+            st.error("❌ Error: " + str(e))
