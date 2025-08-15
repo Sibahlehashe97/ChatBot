@@ -1,89 +1,352 @@
-import os
-import pandas as pd
 import streamlit as st
- 
-from langchain.document_loaders import CSVLoader
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain_huggingface import HuggingFacePipeline
+import pandas as pd
+import re
+from datetime import datetime
+import os
+import json
+from pandas.util import hash_pandas_object   
+from openai import OpenAI
 
-# Add these at the top with other imports
-from langchain.retrievers import BM25Retriever, EnsembleRetriever
-from langchain.text_splitter import RecursiveCharacterTextSplitter 
-# 1. Load CSV
+# === CONFIG ===
+MEMORY_FILE = r"C:\Users\Sibahle Hashe\OneDrive - Motornostix (Pty) Ltd\Documents\Projects\Spyder\MajaraChatBot\memory_cache.json"
+CODE_CACHE_FILE = r"C:\Users\Sibahle Hashe\OneDrive - Motornostix (Pty) Ltd\Documents\Projects\Spyder\MajaraChatBot\code_cache.json"
 
-# 0. Preprocess CSV
-# File paths (ADJUST THESE TO YOUR ACTUAL PATHS)
-original_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/employee_data.csv"
-processed_csv = "C:/Users/Sibahle Hashe/Documents/Projects/Spyder/ChatBotDatabase/processed_employee_data.csv"
 
-# 1. Preprocess data
-df = pd.read_csv(original_csv)
-
-# Create enhanced context
-df["full_context"] = df.apply(
-    lambda row: f"Employee: {row['EmployeeID']}\nRole: {row['Name']} ({row['Department']})\nSkills: {row['Salary']}\nExperience: {row['JoiningDate']} years",
-    axis=1
+client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key="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"   
 )
 
-# Save processed data
-df[["full_context"]].to_csv(processed_csv, index=False)
+# === Utility Functions ===
+def ask_groq_llm(prompt):
+    try:
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": "You are a Python data analyst."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"❌ Groq API error:\n\n{e}"
+    
 
-# 2. Load processed CSV (now use full path here too!)
-loader = CSVLoader(
-    file_path=processed_csv,  # <- Full path
-    csv_args={"fieldnames": ["full_context"]}
-)
-documents = loader.load()
+    
+    
+def load_memory():
+    """
+    Loads a memory dict with keys:
+      - chat_history: list[{"role": "...", "content": "..."}]
+      - column_info: list[str]
+      - sample_data: list[dict]
+    Backward compatible with old list-only files.
+    """
+    if not os.path.exists(MEMORY_FILE):
+        return {"chat_history": [], "column_info": [], "sample_data": []}
 
-# Continue with existing retrieval optimization steps...
-# 2. Split documents into chunks
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-split_documents = text_splitter.split_documents(documents)
+    try:
+        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return {"chat_history": [], "column_info": [], "sample_data": []}
+            data = json.loads(content)
 
-# 3. Create retrievers
-# BM25 (keyword-based)
-bm25_retriever = BM25Retriever.from_documents(split_documents)
-bm25_retriever.k = 3
+            # If old format (list), wrap it
+            if isinstance(data, list):
+                return {"chat_history": data, "column_info": [], "sample_data": []}
 
-# Vector Store (semantic)
-hf_embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vector_store = Chroma.from_documents(split_documents, hf_embeddings)
-vector_retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+            # Ensure required keys exist
+            if not isinstance(data, dict):
+                return {"chat_history": [], "column_info": [], "sample_data": []}
+            data.setdefault("chat_history", [])
+            data.setdefault("column_info", [])
+            data.setdefault("sample_data", [])
+            return data
+    except json.JSONDecodeError:
+        return {"chat_history": [], "column_info": [], "sample_data": []}
 
-# Hybrid retriever
-ensemble_retriever = EnsembleRetriever(
-    retrievers=[vector_retriever, bm25_retriever],
-    weights=[0.6, 0.4]
-)
- 
 
-# 3. Load LLM
-llm = HuggingFacePipeline.from_model_id(
-    model_id="google/flan-t5-large",
-    task="text2text-generation",
-    pipeline_kwargs={"max_new_tokens": 128}
-)
- 
-# 4. Setup QA chain
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",  # Better for small contexts
-    retriever=ensemble_retriever,  # Use our combined retriever
-    return_source_documents=False,
-)
- 
-# 5. Streamlit UI
-st.title("📊 Employee Chatbot")
-st.write("Ask any question about the employee dataset:")
- 
-user_question = st.text_input("Your question")
- 
-if user_question:
-    with st.spinner("Thinking..."):
-        response = qa_chain.run(user_question)
-    st.success(response)
- 
-import sys
-print(sys.executable)
+
+
+
+def save_memory(memory_dict):
+    """
+    Persists the full memory dict.
+    """
+    safe = {
+        "chat_history": memory_dict.get("chat_history", []),
+        "column_info": memory_dict.get("column_info", []),
+        "sample_data": memory_dict.get("sample_data", []),
+    }
+    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(safe, f, indent=2)
+        
+def persist_chat_history():
+    # Ensure the dict and the session copy stay in sync
+    st.session_state.memory["chat_history"] = st.session_state.chat_history
+    save_memory(st.session_state.memory)
+       
+        
+        
+
+def load_code_cache():
+    if os.path.exists(CODE_CACHE_FILE):
+        try:
+            with open(CODE_CACHE_FILE, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    return {}
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    return {eval(k): v for k, v in data.items()}
+                else:
+                    return {}  # if file contains a list or something else
+        except (json.JSONDecodeError, SyntaxError):
+            return {}
+    return {}
+
+
+
+
+def save_code_cache(cache):
+    with open(CODE_CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump({str(k): v for k, v in cache.items()}, f, indent=2)
+
+def create_dataset_hash(df):
+    return hash(tuple(hash_pandas_object(df)))
+
+def create_sample_hash(sample):
+    return hash(frozenset(frozenset(d.items()) for d in sample))
+
+
+def rephrase_question(original_q, column_info):
+    """
+    Calls the LLM to rewrite a user question into an unambiguous, explicit version
+    that clearly refers to the dataset columns.
+    """
+    prompt = f"""
+    You are a data analyst.
+    The dataset has the following columns: {column_info}.
+    Rewrite the following question to be clear, explicit, and directly refer to the dataset's columns.
+    Keep the meaning the same, but remove ambiguity. This question will be sent to an LLM where it will use it to 
+    answer it to understand it and then create a pandas code for answering that question about the data
+
+    Original question: "{original_q}"
+    Rephrased question:
+    """
+    response = ask_groq_llm(prompt)
+    return response.strip()
+
+def build_conversation_context(n_turns=5):
+    history = st.session_state.chat_history[-n_turns:]
+    lines = []
+    for msg in history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        lines.append(f"{role}: {msg['content']}")
+    return "\n".join(lines)
+
+
+
+
+
+
+
+
+
+
+
+# === Streamlit UI ===
+st.set_page_config(page_title="Ask Your Excel File", layout="centered")
+with st.container():
+    st.markdown("""
+    <style>
+    body {
+        background-color: #f4f4f9;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    h1 {
+        color: #0d47a1;
+    }s
+    .stTextInput>div>div>input {
+        border: 2px solid #90caf9;
+        border-radius: 8px;
+    }
+    .stButton>button {
+        background-color: #1976d2;
+        color: white;
+        border-radius: 8px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+col1, col2 = st.columns([1, 10])
+with col1:
+    st.image("C:/Users/Sibahle Hashe/OneDrive - Motornostix (Pty) Ltd/Documents/Projects/Spyder/MajaraChatBot/motornostix_logo.png", width=80)
+with col2:
+    st.markdown("<h1 style='margin-top: 0;'>Motornostix ChatBot</h1>", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# === Session State Init ===
+if 'memory' not in st.session_state:
+    st.session_state.memory = load_memory()
+
+# Keep a direct list for convenience (what your code already uses)
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = st.session_state.memory.get("chat_history", [])
+
+if 'code_cache' not in st.session_state:
+    st.session_state.code_cache = load_code_cache()
+
+if 'result_cache' not in st.session_state:
+    st.session_state.result_cache = {}
+
+
+
+uploaded_file = st.file_uploader("📁 Upload your Excel file", type=["xlsx"])
+
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
+    st.success("✅ Data loaded successfully!")
+    st.dataframe(df.head(), use_container_width=True)
+
+    sample_data_df = df.head(3)
+    
+    # This handles common non-serializable types like Timestamp
+    # Convert all columns to strings to be safe for JSON serialization.
+    # A more selective approach could be used for performance, but this is robust.
+    for col in sample_data_df.columns:
+        if sample_data_df[col].dtype.name.startswith('datetime'):
+            sample_data_df[col] = sample_data_df[col].astype(str)
+        # You can add more checks for other non-serializable types if needed
+
+    # Save dataset metadata into memory dict (used by prompts later)
+    st.session_state.memory["column_info"] = list(df.columns)
+    st.session_state.memory["sample_data"] = sample_data_df.to_dict(orient="records")
+    save_memory(st.session_state.memory)
+
+    
+    
+    
+    
+    user_question = st.text_input("💬 Ask a question about the dataset:",
+                                      placeholder="e.g., How many issues were opened last month?")
+        
+        
+        
+    
+    if user_question:
+        # Use metadata from memory (always up to date)
+        column_info = ", ".join(st.session_state.memory["column_info"])
+        sample_data = st.session_state.memory["sample_data"]
+    
+        # Rephrase first
+        rephrased_question = rephrase_question(user_question, column_info)
+    
+        # Build conversation context (last 5 turns)
+        conversation_context = build_conversation_context(n_turns=5)
+    
+        # Cache key should use the rephrased question
+        sample_hash = create_sample_hash(sample_data)
+        cache_key = (rephrased_question, tuple(st.session_state.memory["column_info"]), sample_hash)
+    
+    # Only check cache if cache_key is defined
+        if cache_key and cache_key in st.session_state.code_cache:
+            st.info("♻️ Using cached code (exact match)")
+            clean_code = st.session_state.code_cache[cache_key]
+        
+            st.info("♻️ Using cached code")
+            st.session_state.chat_history.append({"role": "user", "content": user_question})
+            st.session_state.chat_history.append({"role": "assistant", "content": clean_code})
+            persist_chat_history()
+        else:
+            
+            st.warning("🧠 Asking Groq...")
+            prompt = f"""
+        You are a helpful Python data analyst.
+        
+        Here is the recent conversation:
+        {conversation_context}
+        
+        The dataset has the following columns: {column_info}
+        Here are a few sample rows: {sample_data}
+        
+        The user now asks: "{rephrased_question}"
+        
+        Write a Python function named answer(df) that answers the question using pandas.
+        Only return the code with the function definition and no explanations or markdown.
+        If needed, import datetime like this:   
+        
+        def answer(df):
+            from datetime import datetime   
+            # logic here
+        
+        The function should return the final result. 
+        """
+            raw_code = ask_groq_llm(prompt)
+        
+            # Record to history
+            # === Log the user question ===
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": user_question,
+                "metadata": {
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "question"
+                }
+            })
+            
+            # === Log the assistant's response ===
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": raw_code,
+                "metadata": {
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "code_response",
+                    "columns_used": list(df.columns),  # Or parsed columns from code if you want
+                    "row_count": len(df)
+                }
+            })
+            
+            # Save everything to JSON
+            persist_chat_history()
+        
+        
+            # Clean + cache
+            clean_code = re.sub(r"```(?:python)?|```", "", raw_code).strip()
+            st.session_state.code_cache[cache_key] = clean_code
+            save_code_cache(st.session_state.code_cache)
+        
+            # Show code + execute (unchanged)
+            st.subheader("🔧 Generated Code")
+            st.code(clean_code, language="python")
+            
+                # === ADD THIS NEW SECTION TO EXECUTE THE CODE AND SHOW RESULTS ===
+            st.subheader("📊 Result")
+            try:
+                # Create a dictionary to hold the function and other variables
+                # This is safer than using globals() directly
+                local_scope = {"df": df, "datetime": datetime}
+                
+                # Execute the code to define the 'answer' function
+                exec(clean_code, globals(), local_scope)
+    
+                # Call the 'answer' function with the DataFrame
+                # The 'answer' function is now available in local_scope
+                if "answer" in local_scope:
+                    result = local_scope["answer"](df)
+                    
+                    # Display the result
+                    st.write(result)
+                else:
+                    st.error("❌ The generated code did not define a function named 'answer'.")
+    
+            except Exception as e:
+                st.error(f"❌ An error occurred while executing the generated code:\n\n{e}")
+    
+    # ... (rest of your program, which should now be outside the if uploaded_file block) ...
+        
